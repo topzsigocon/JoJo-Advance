@@ -1,0 +1,189 @@
+name: JoJo GBA - CI Diagnostics
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jojo-gba-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnose-and-build:
+    name: Diagnose project and test GBA build
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITARM: /opt/devkitpro/devkitARM
+      PATH: /opt/devkitpro/devkitARM/bin:/opt/devkitpro/tools/bin:/opt/devkitpro/portlibs/gba/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create diagnostic folder
+        shell: bash
+        run: mkdir -p diagnostics
+
+      - name: Report runner and toolchain information
+        shell: bash
+        run: |
+          set +e
+          {
+            echo '===== RUNNER ====='
+            date -u
+            uname -a
+            echo "PWD=$PWD"
+            echo "GITHUB_REF=$GITHUB_REF"
+            echo "GITHUB_SHA=$GITHUB_SHA"
+            echo
+            echo '===== PROJECT ROOT ====='
+            ls -la
+            echo
+            echo '===== REQUIRED COMMANDS ====='
+            for tool in arm-none-eabi-g++ arm-none-eabi-gcc arm-none-eabi-ld make python3 git unzip; do
+              echo "--- $tool ---"
+              command -v "$tool" 2>&1 || true
+            done
+            echo
+            echo '===== COMPILER VERSION ====='
+            arm-none-eabi-g++ --version 2>&1 || true
+            echo
+            echo '===== MAKE VERSION ====='
+            make --version 2>&1 | head -n 2 || true
+            echo
+            echo '===== PYTHON VERSION ====='
+            python3 --version 2>&1 || true
+            echo
+            echo '===== DEVKITPRO ====='
+            ls -la /opt/devkitpro 2>&1 || true
+            ls -la /opt/devkitpro/devkitARM 2>&1 || true
+          } 2>&1 | tee diagnostics/environment.log
+
+      - name: Find and extract update ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo '===== ZIP FILES IN REPOSITORY ====='
+            find . -maxdepth 4 -type f -iname '*.zip' -print | sort || true
+            echo
+            if [[ -f update.zip ]]; then
+              ARCHIVE='update.zip'
+            elif [[ -f updates/update.zip ]]; then
+              ARCHIVE='updates/update.zip'
+            else
+              ARCHIVE=''
+            fi
+
+            if [[ -n "$ARCHIVE" ]]; then
+              echo "Selected update archive: $ARCHIVE"
+              echo '===== ARCHIVE CONTENTS ====='
+              unzip -l "$ARCHIVE"
+              echo '===== EXTRACTING ARCHIVE INTO REPOSITORY ROOT ====='
+              unzip -o "$ARCHIVE" -d .
+            else
+              echo 'No update ZIP found. Continuing with files already committed in the repository.'
+            fi
+          } 2>&1 | tee diagnostics/archive.log
+
+      - name: Check project structure and roster
+        shell: bash
+        run: |
+          set +e
+          FAIL=0
+          {
+            echo '===== PROJECT FILE CHECK ====='
+            for path in Makefile src/main.cpp scripts/validate_roster.py scripts/verify_gba_rom.py; do
+              if [[ -f "$path" ]]; then
+                echo "PASS: $path"
+              else
+                echo "FAIL: missing $path"
+                FAIL=1
+              fi
+            done
+            echo
+            echo '===== TOP-LEVEL TREE ====='
+            find . -maxdepth 3 -type f -not -path './.git/*' -not -path './diagnostics/*' | sort | head -n 250
+            echo
+            echo '===== ROSTER VALIDATION ====='
+            if [[ -f scripts/validate_roster.py ]]; then
+              python3 scripts/validate_roster.py
+              ROSTER_STATUS=$?
+              echo "Roster validator exit code: $ROSTER_STATUS"
+              [[ $ROSTER_STATUS -eq 0 ]] || FAIL=1
+            else
+              echo 'SKIP: roster validator is missing'
+              FAIL=1
+            fi
+            echo
+            echo "PROJECT_CHECK_EXIT_CODE=$FAIL"
+            exit "$FAIL"
+          } 2>&1 | tee diagnostics/project-check.log
+          CHECK_STATUS=${PIPESTATUS[0]}
+          exit "$CHECK_STATUS"
+
+      - name: Fetch Butano 21.9.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            if [[ -d ../butano/.git ]]; then
+              echo 'Butano checkout already exists; reusing it.'
+            else
+              rm -rf ../butano
+              git clone --depth 1 --branch 21.9.0 https://github.com/GValiente/butano.git ../butano
+            fi
+            echo '===== BUTANO CHECK ====='
+            test -f ../butano/butano.mak
+            git -C ../butano describe --tags --always 2>&1 || true
+            ls -l ../butano/butano.mak
+          } 2>&1 | tee diagnostics/butano.log
+
+      - name: Build ROM and preserve complete compiler output
+        shell: bash
+        run: |
+          set +e
+          echo '===== MAKE CLEAN =====' | tee diagnostics/build.log
+          make clean 2>&1 | tee -a diagnostics/build.log
+          CLEAN_STATUS=${PIPESTATUS[0]}
+          echo "make clean exit code: $CLEAN_STATUS" | tee -a diagnostics/build.log
+          if [[ $CLEAN_STATUS -ne 0 ]]; then
+            exit "$CLEAN_STATUS"
+          fi
+
+          echo '===== MAKE -j2 =====' | tee -a diagnostics/build.log
+          make -j2 2>&1 | tee -a diagnostics/build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          echo "make exit code: $BUILD_STATUS" | tee -a diagnostics/build.log
+          exit "$BUILD_STATUS"
+
+      - name: Verify generated GBA ROM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo '===== ROM FILE ====='
+            ls -lh jojo_allstar_gba.gba
+            echo
+            echo '===== ROM HEADER VALIDATION ====='
+            python3 scripts/verify_gba_rom.py jojo_allstar_gba.gba
+          } 2>&1 | tee diagnostics/rom-verification.log
+
+      - name: Upload diagnostic logs and ROM (even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jojo-gba-ci-report-${{ github.run_number }}
+          path: |
+            diagnostics/
+            jojo_allstar_gba.gba
+          if-no-files-found: warn
+          retention-days: 30
