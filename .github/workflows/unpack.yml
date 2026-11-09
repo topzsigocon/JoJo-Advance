@@ -1,23 +1,35 @@
 name: Unpack update.zip
 
-# This workflow only extracts uploaded ZIP files and commits the changes.
-# Your separate CI/build workflow should start after this commit is pushed.
+# Extracts any *.zip uploaded to the repository root, deletes the zip, commits
+# the result, then starts the CI workflow.
+#
+# Why the explicit dispatch at the end: pushes made with GITHUB_TOKEN do not
+# trigger other workflows, so CI would never run after the unpack commit.
+# (workflow_dispatch via GITHUB_TOKEN is the documented exception.)
+#
+# Files under .github/ inside the zip are skipped on purpose: GITHUB_TOKEN may
+# not modify workflow files. Edit workflows directly in the repository.
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - '*.zip'
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
+
+concurrency:
+  group: unpack-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   unpack:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -47,7 +59,7 @@ jobs:
           if [ -f REMOVE.txt ]; then
             while IFS= read -r path || [ -n "$path" ]; do
               case "$path" in
-                ''|'#'*|.git*|*..*|/*) continue ;;
+                ''|'#'*|.git*|.github*|*..*|/*) continue ;;
               esac
               git rm -r -q --ignore-unmatch -- "$path"
             done < REMOVE.txt
@@ -55,6 +67,7 @@ jobs:
           fi
 
       - name: Commit extracted project files
+        id: commit
         shell: bash
         run: |
           set -euo pipefail
@@ -63,7 +76,16 @@ jobs:
           git add -A
           if git diff --cached --quiet; then
             echo "Walang pagbabago; walang commit na gagawin."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git commit -m "Unpack update ZIP"
-          git push
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Start CI on the unpacked commit
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref "${GITHUB_REF_NAME}"
