@@ -1,0 +1,4 @@
+This package contains no ripped or extracted JoJo game/anime assets.
+The prototype fighters are generic placeholder pixel figures made from simple shapes.
+Add only original or properly licensed art, audio, fonts, and other assets.
+Butano is a third-party open-source engine under its own zlib license; see its upstream repository for its license and third-party notices.
