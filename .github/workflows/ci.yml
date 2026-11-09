@@ -1,132 +1,130 @@
-name: Build GBA ROM
+name: JoJo-Advance CI - Toolchain and ROM Build
 
 on:
   push:
-    branches: [main]
-    # A pushed ZIP is handled by unpack.yml, which starts this workflow itself.
-    paths-ignore:
-      - '*.zip'
-      - '**/*.md'
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
   workflow_dispatch:
-    inputs:
-      butano_ref:
-        description: 'Butano tag or branch to build against'
-        required: false
-        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: gba-ci-${{ github.ref }}
+  group: jojo-advance-ci-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  # Default Butano version. Override per-run with the workflow_dispatch input,
-  # or repo-wide with a repository variable named BUTANO_REF.
-  BUTANO_REF: ${{ inputs.butano_ref || vars.BUTANO_REF || '21.9.0' }}
-  ROM_FILE: jojo_allstar_gba.gba
-  ROM_TITLE: JOJO ALLSTAR
-  ROM_CODE: JJBA
 
 jobs:
   build:
-    name: Validate and build ROM
+    name: Verify devkitARM, Butano and build ROM
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Use the official devkitPro GBA development image.
+    # Pin a dated tag so the toolchain does not silently change.
     container:
-      image: devkitpro/devkitarm:latest
+      image: devkitpro/devkitarm:20260610
+
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITARM: /opt/devkitpro/devkitARM
+      PATH: /opt/devkitpro/devkitARM/bin:/opt/devkitpro/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure required tools
+      - name: Create diagnostic directory
+        shell: bash
+        run: mkdir -p diagnostics
+
+      - name: Diagnose devkitPro image and compiler
         shell: bash
         run: |
-          set -euo pipefail
-          need_install=0
-          for t in python3 git make unzip; do
-            command -v "$t" >/dev/null || need_install=1
-          done
-          if [ "$need_install" -eq 1 ]; then
-            apt-get update -qq
-            apt-get install -y -qq python3 git make unzip
-          fi
-          command -v arm-none-eabi-g++ >/dev/null || { echo "::error::devkitARM not found in image"; exit 1; }
-          arm-none-eabi-g++ --version | head -n 1
-          python3 --version
-          make --version | head -n 1
-
-      - name: Make sure asset folders exist
-        run: mkdir -p include graphics audio dmg_audio build
-
-      - name: Validate roster
-        run: python3 scripts/validate_roster.py
-
-      - name: Cache Butano
-        id: butano-cache
-        uses: actions/cache@v4
-        with:
-          path: ../butano
-          key: butano-${{ env.BUTANO_REF }}
-
-      - name: Fetch Butano
-        if: steps.butano-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf ../butano
-          git clone --depth 1 --branch "$BUTANO_REF" https://github.com/GValiente/butano.git ../butano
-
-      - name: Check Butano
-        run: test -f ../butano/butano.mak
-
-      - name: Build ROM
-        shell: bash
-        run: |
-          set -euo pipefail
-          make clean
-          make -j"$(nproc)" 2>&1 | tee build.log
-
-      - name: Verify ROM
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s "$ROM_FILE"
-          python3 scripts/verify_gba_rom.py "$ROM_FILE" --title "$ROM_TITLE" --code "$ROM_CODE" | tee rom-verification.log
-
-      - name: Job summary
-        if: always()
-        shell: bash
-        run: |
+          set -Eeuo pipefail
           {
-            echo "## GBA build"
-            echo "- Butano ref: \`$BUTANO_REF\`"
-            if [ -f "$ROM_FILE" ]; then
-              echo "- ROM: \`$ROM_FILE\` ($(du -h "$ROM_FILE" | cut -f1))"
-              echo "- SHA-256: \`$(sha256sum "$ROM_FILE" | cut -d' ' -f1)\`"
+            echo "===== CONTAINER ====="
+            cat /etc/os-release || true
+            echo
+            echo "===== DEVKITPRO ENVIRONMENT ====="
+            echo "DEVKITPRO=$DEVKITPRO"
+            echo "DEVKITARM=$DEVKITARM"
+            echo "PATH=$PATH"
+            echo
+            echo "===== /opt/devkitpro ====="
+            ls -la /opt/devkitpro
+            echo
+            echo "===== devkitARM directory ====="
+            if [[ -d "$DEVKITARM" ]]; then
+              ls -la "$DEVKITARM"
             else
-              echo "- ROM was **not** produced"
+              echo "Expected directory missing: $DEVKITARM"
+              find /opt/devkitpro -maxdepth 4 -type d -iname '*devkitarm*' -print || true
+              find / -type f -name arm-none-eabi-g++ 2>/dev/null | head -n 20 || true
+              exit 1
             fi
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo
+            echo "===== REQUIRED COMMANDS ====="
+            for tool in arm-none-eabi-g++ arm-none-eabi-gcc arm-none-eabi-ld make python3 git; do
+              command -v "$tool"
+            done
+            echo
+            arm-none-eabi-g++ --version
+            make --version | head -n 1
+            python3 --version
+          } 2>&1 | tee diagnostics/toolchain.log
 
-      - name: Upload ROM
-        uses: actions/upload-artifact@v4
-        with:
-          name: jojo-allstar-gba-${{ github.run_number }}
-          path: ${{ env.ROM_FILE }}
-          if-no-files-found: error
-          retention-days: 30
+      - name: Validate project files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "===== ROOT FILES ====="
+            ls -la
+            echo
+            for file in Makefile src/main.cpp scripts/validate_roster.py scripts/verify_gba_rom.py; do
+              if [[ -f "$file" ]]; then
+                echo "PASS: $file"
+              else
+                echo "FAIL: missing $file"
+                exit 1
+              fi
+            done
+            echo
+            python3 scripts/validate_roster.py
+          } 2>&1 | tee diagnostics/project.log
 
-      - name: Upload logs
+      - name: Fetch Butano 21.9.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf ../butano
+          git clone --depth 1 --branch 21.9.0 https://github.com/GValiente/butano.git ../butano
+          test -f ../butano/butano.mak
+          git -C ../butano describe --tags --always
+        # Butano source is fetched outside the project directory because
+        # the project's Makefile expects LIBBUTANO := ../butano.
+
+      - name: Build GBA ROM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          make clean
+          make -j2 2>&1 | tee diagnostics/build.log
+          test -s jojo_allstar_gba.gba
+
+      - name: Verify GBA ROM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ls -lh jojo_allstar_gba.gba
+          python3 scripts/verify_gba_rom.py jojo_allstar_gba.gba 2>&1 | tee diagnostics/rom.log
+
+      - name: Upload CI report and ROM
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs-${{ github.run_number }}
+          name: jojo-advance-ci-${{ github.run_number }}
           path: |
-            build.log
-            rom-verification.log
-          if-no-files-found: ignore
-          retention-days: 14
+            diagnostics/
+            jojo_allstar_gba.gba
+          if-no-files-found: warn
+          retention-days: 30
