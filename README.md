@@ -30,13 +30,12 @@ This package is an early playable foundation, not a finished game. It contains a
 - After a winner appears, A restarts the round.
 
 ## GitHub Actions
-1. Create or open your project repository.
-2. Extract the contents of this ZIP into the repository root, preserving folder paths.
-3. Commit and push to `main`, or run **Actions → Build JoJo All-Star GBA ROM → Run workflow**.
-4. Open the completed workflow run and download the `jojo-allstar-gba` artifact.
-5. Extract the artifact ZIP to obtain `jojo_allstar_gba.gba`, then open it in mGBA or another GBA emulator.
+Two workflows live in `.github/workflows/`:
 
-The workflow uses the `devkitPro/setup-devkitpro` action with the `gba-dev` package group and clones Butano as a sibling directory (`../butano`), matching the Makefile's `LIBBUTANO := ../butano` path.
+- **Unpack update.zip** (`unpack.yml`): upload a `.zip` to the repository root on `main`; it is extracted, deleted, committed, and CI is started automatically. Files under `.github/` inside the zip are ignored. An optional `REMOVE.txt` in the zip lists paths to delete.
+- **Build GBA ROM** (`ci.yml`): runs on push, pull request, or manually. It validates the roster, builds with the `devkitpro/devkitarm` container and Butano (`BUTANO_REF`, default `21.9.0`), checks the ROM header, and uploads `jojo-allstar-gba-<run>` containing `jojo_allstar_gba.gba`.
+
+Download the artifact from the run page, extract it, and open the `.gba` in mGBA or another emulator.
 
 ## Local build
 Install devkitPro's GBA Development component (`gba-dev`), Python 3, Git, and Make. Clone Butano next to this project directory as `../butano`, then run `make -j2` from this project's root. The output should be `jojo_allstar_gba.gba`.
